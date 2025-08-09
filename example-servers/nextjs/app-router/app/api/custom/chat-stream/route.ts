@@ -49,7 +49,7 @@ async function sendStreamChunks(
   chunks: string[]
 ): Promise<void> {
   for (const chunk of chunks) {
-    if (chunk.trim()) {
+    if (chunk) {
       const data = JSON.stringify({ text: chunk });
       await writer.write(encoder.encode(`data: ${data}\n\n`));
 
@@ -140,8 +140,12 @@ export async function POST(request: NextRequest): Promise<Response> {
       input: userText,
     });
 
+    console.log('OpenAI response:', aiResponse);
+
     // Extract response text
     const fullText = (aiResponse as any).output_text || '';
+
+    console.log('Full text:', fullText);
 
     if (!fullText) {
       await sendErrorMessage(writer, encoder, 'Received empty response from AI service.');
@@ -153,8 +157,10 @@ export async function POST(request: NextRequest): Promise<Response> {
     // Split response into chunks for streaming (preserve spaces for smooth UI)
     const responseChunks = fullText.split(/(\s+)/).filter(Boolean);
 
+    console.log('Response chunks:', responseChunks);
+
     // Send chunks as streaming response
-    await sendStreamChunks(writer, encoder, responseChunks);
+    sendStreamChunks(writer, encoder, responseChunks);
 
     return new Response(stream, {
       headers: createStreamingHeaders(),

@@ -1,10 +1,15 @@
-import { DeepChat } from 'deep-chat-react';
+import dynamic from 'next/dynamic';
 
 type Props = {
   styles: Record<string, string>;
 };
 
 const CohereSection = (props: Props) => {
+  // need to import the component dynamically as it uses the 'window' property
+  const DeepChat = dynamic(() => import('deep-chat-react').then((mod) => mod.DeepChat), {
+    ssr: false,
+  });
+
   const { styles } = props;
   return (
     <>

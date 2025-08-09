@@ -4,7 +4,6 @@
 
 // !!Useful links at the bottom!!
 // import {DeepChat as DeepChatCore} from 'deep-chat'; <- type
-import dynamic from 'next/dynamic';
 import CohereSection from './components/CohereSection';
 import CustomAISection from './components/CustomAISection';
 import HuggingFaceSection from './components/HuggingFaceSection';
@@ -19,11 +18,6 @@ import styles from './style.module.css';
 // https://github.com/OvidijusParsiunas/deep-chat/issues/59#issuecomment-1839487740
 
 export default function Home() {
-  // need to import the component dynamically as it uses the 'window' property
-  const DeepChat = dynamic(() => import('deep-chat-react').then((mod) => mod.DeepChat), {
-    ssr: false,
-  });
-
   return (
     <>
       <main className={styles.main}>
