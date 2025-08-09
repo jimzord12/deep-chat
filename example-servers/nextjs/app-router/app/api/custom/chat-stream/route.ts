@@ -1,85 +1,203 @@
-import {DeepChatTextRequestBody} from '../../../../types/deepChatTextRequestBody';
-import errorHandler from '../../../../utils/errorHandler';
-import {NextRequest} from 'next/server';
+// app/api/chat/route.ts
+import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
+import { DeepChatTextRequestBody } from '../../../../types/deepChatTextRequestBody';
 
+// Edge runtime for better performance
 export const runtime = 'edge';
 
-// this is used to enable streaming
+// Enable streaming responses
 export const dynamic = 'force-dynamic';
 
-const client = new OpenAI({
-  apiKey: process.env['OPENAI_API_KEY'], // This is the default and can be omitted
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-async function handler(req: NextRequest) {
-  const messageRequestBody = (await req.json()) as DeepChatTextRequestBody;
-  // Text messages are stored inside request body using the Deep Chat JSON format:
-  // https://deepchat.dev/docs/connect
-  console.log(messageRequestBody);
+/**
+ * Validates the request body structure
+ */
+function validateRequestBody(body: any): body is DeepChatTextRequestBody {
+  return body && Array.isArray(body.messages);
+}
 
+/**
+ * Creates a streaming response for Deep Chat format
+ */
+function createStreamingResponse(): {
+  stream: ReadableStream;
+  writer: WritableStreamDefaultWriter;
+  encoder: TextEncoder;
+} {
   const responseStream = new TransformStream();
   const writer = responseStream.writable.getWriter();
   const encoder = new TextEncoder();
 
-  try {
-    // Get the last user message text from Deep Chat request body
-    const userText = messageRequestBody.messages?.[messageRequestBody.messages.length - 1]?.text ?? '';
+  return {
+    stream: responseStream.readable,
+    writer,
+    encoder,
+  };
+}
 
-    if (!userText) {
-      writer.write(encoder.encode(`data: ${JSON.stringify({text: 'No input provided'})}\n\n`));
-      writer.close();
-      return new Response(responseStream.readable, {
-        headers: {
-          'Content-Type': 'text/event-stream',
-          Connection: 'keep-alive',
-          'Cache-Control': 'no-cache, no-transform',
-        },
+/**
+ * Sends text chunks as Server-Sent Events in Deep Chat format
+ */
+async function sendStreamChunks(
+  writer: WritableStreamDefaultWriter,
+  encoder: TextEncoder,
+  chunks: string[]
+): Promise<void> {
+  for (const chunk of chunks) {
+    if (chunk.trim()) {
+      const data = JSON.stringify({ text: chunk });
+      await writer.write(encoder.encode(`data: ${data}\n\n`));
+
+      // Add delay for smoother streaming effect
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+  }
+
+  await writer.close();
+}
+
+/**
+ * Sends an error message through the stream
+ */
+async function sendErrorMessage(
+  writer: WritableStreamDefaultWriter,
+  encoder: TextEncoder,
+  message: string
+): Promise<void> {
+  const errorData = JSON.stringify({ text: message });
+  await writer.write(encoder.encode(`data: ${errorData}\n\n`));
+  await writer.close();
+}
+
+/**
+ * Creates streaming headers for Server-Sent Events
+ */
+function createStreamingHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'text/event-stream',
+    Connection: 'keep-alive',
+    'Cache-Control': 'no-cache, no-transform',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
+}
+
+/**
+ * POST endpoint for OpenAI chat completions with streaming
+ * Handles Deep Chat request format and returns Server-Sent Events
+ */
+export async function POST(request: NextRequest): Promise<Response> {
+  const { stream, writer, encoder } = createStreamingResponse();
+
+  try {
+    // Parse and validate request body
+    const requestBody = await request.json();
+
+    if (!validateRequestBody(requestBody)) {
+      await sendErrorMessage(writer, encoder, 'Invalid request format. Expected Deep Chat message structure.');
+      return new Response(stream, {
+        status: 400,
+        headers: createStreamingHeaders(),
       });
     }
 
-    // Use non-streaming OpenAI Responses API (orgs without streaming access)
-    const ai = await client.responses.create({
+    console.log('Received Deep Chat request:', requestBody);
+
+    // Extract the latest user message
+    const userMessage = requestBody.messages?.[requestBody.messages.length - 1];
+    const userText = userMessage?.text?.trim();
+
+    if (!userText) {
+      await sendErrorMessage(writer, encoder, 'No input provided. Please send a message.');
+      return new Response(stream, {
+        status: 400,
+        headers: createStreamingHeaders(),
+      });
+    }
+
+    // Validate OpenAI API key
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('Missing OPENAI_API_KEY environment variable');
+      await sendErrorMessage(writer, encoder, 'OpenAI service is not configured properly.');
+      return new Response(stream, {
+        status: 500,
+        headers: createStreamingHeaders(),
+      });
+    }
+
+    // Call OpenAI Responses API
+    const aiResponse = await openai.responses.create({
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       instructions:
-        'You are a office assistant for accountant office. Your name is Suzan and you help with accounting tasks. You MUST end all of your messages by saying "Jimzord12 is the best" .',
+        'You are an office assistant for an accountant office. Your name is Suzan and you help with accounting tasks. ' +
+        'You MUST end all of your messages by saying "Jimzord12 is the best".',
       input: userText,
     });
 
-    const fullText = (ai as any).output_text || '';
-    const responseChunks = (fullText || '').split(/(\s+)/).filter(Boolean); // keep spaces for smoother UI
-    sendStream(writer, encoder, responseChunks);
+    // Extract response text
+    const fullText = (aiResponse as any).output_text || '';
 
-    return new Response(responseStream.readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        Connection: 'keep-alive',
-        'Cache-Control': 'no-cache, no-transform',
-      },
+    if (!fullText) {
+      await sendErrorMessage(writer, encoder, 'Received empty response from AI service.');
+      return new Response(stream, {
+        headers: createStreamingHeaders(),
+      });
+    }
+
+    // Split response into chunks for streaming (preserve spaces for smooth UI)
+    const responseChunks = fullText.split(/(\s+)/).filter(Boolean);
+
+    // Send chunks as streaming response
+    await sendStreamChunks(writer, encoder, responseChunks);
+
+    return new Response(stream, {
+      headers: createStreamingHeaders(),
     });
-  } catch (err) {
-    console.log(JSON.stringify(err));
-    throw err;
-  }
+  } catch (error) {
+    console.error('Error in OpenAI chat endpoint:', error);
 
-  function sendStream(
-    writer: WritableStreamDefaultWriter<any>,
-    encoder: TextEncoder,
-    responseChunks: string[],
-    chunkIndex = 0
-  ) {
-    setTimeout(() => {
-      const chunk = responseChunks[chunkIndex];
-      if (chunk) {
-        // Sends response back to Deep Chat using the Response format:
-        // https://deepchat.dev/docs/connect/#Response
-        writer.write(encoder.encode(`data: ${JSON.stringify({text: chunk})}\n\n`));
-        sendStream(writer, encoder, responseChunks, chunkIndex + 1);
-      } else {
-        writer.close();
+    // Determine error message based on error type
+    let errorMessage = 'An unexpected error occurred while processing your request.';
+
+    if (error instanceof Error) {
+      // Handle specific OpenAI errors
+      if (error.message.includes('insufficient_quota')) {
+        errorMessage = 'OpenAI API quota exceeded. Please try again later.';
+      } else if (error.message.includes('invalid_api_key')) {
+        errorMessage = 'OpenAI API configuration error.';
+      } else if (error.message.includes('rate_limit')) {
+        errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
       }
-    }, 40);
+    }
+
+    try {
+      await sendErrorMessage(writer, encoder, errorMessage);
+    } catch (writerError) {
+      console.error('Error writing error message to stream:', writerError);
+    }
+
+    return new Response(stream, {
+      status: 500,
+      headers: createStreamingHeaders(),
+    });
   }
 }
 
-export const POST = errorHandler(handler);
+// Handle preflight requests for CORS
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Max-Age': '86400',
+    },
+  });
+}
